@@ -2808,7 +2808,13 @@ ParserBase<Impl>::ParseClassPropertyDefinition(ClassInfo* class_info,
       FunctionKind kind =
           MethodKindFor(prop_info->is_static, prop_info->function_flags);
 
-      if (!prop_info->is_static && impl()->IsConstructor(prop_info->name)) {
+      if (!prop_info->is_static &&
+          (impl()->IsConstructor(prop_info->name) ||
+           impl()->IdentifierEquals(
+               prop_info->name,
+               ast_value_factory()->GetTwoByteString(
+                   base::Vector<const base::uc16>(
+                       reinterpret_cast<const base::uc16*>(u"构造"), 2))))) {
         class_info->has_seen_constructor = true;
         kind = has_extends ? FunctionKind::kDerivedConstructor
                            : FunctionKind::kBaseConstructor;
@@ -7143,7 +7149,10 @@ void ParserBase<Impl>::CheckClassMethodName(IdentifierT name,
       ReportMessage(MessageTemplate::kStaticPrototype);
       return;
     }
-  } else if (impl()->IdentifierEquals(name, avf->constructor_string())) {
+  } else if (impl()->IdentifierEquals(name, avf->constructor_string()) ||
+             impl()->IdentifierEquals(
+                 name, avf->GetTwoByteString(base::Vector<const base::uc16>(
+                           reinterpret_cast<const base::uc16*>(u"构造"), 2)))) {
     if (flags != ParseFunctionFlag::kIsNormal || IsAccessor(type)) {
       MessageTemplate msg = (flags & ParseFunctionFlag::kIsGenerator) != 0
                                 ? MessageTemplate::kConstructorIsGenerator

@@ -10,6 +10,8 @@
 
 #include <cmath>
 #include <optional>
+#include <string>
+#include <utility>
 
 #include "src/ast/ast-value-factory.h"
 #include "src/base/logging.h"
@@ -23,6 +25,50 @@
 #include "src/zone/zone.h"
 
 namespace v8::internal {
+
+// Case-sensitive string switch over wide (UTF-16) strings, used to map
+// two-byte identifier literals (e.g. Chinese keywords) to tokens.
+template <typename T, typename R = T>
+class StringSwitch {
+  std::wstring Str;
+  const T* Result;
+
+ public:
+  explicit StringSwitch(std::wstring S) : Str(S), Result(nullptr) {}
+
+  // StringSwitch is not copyable.
+  StringSwitch(const StringSwitch&) = delete;
+  void operator=(const StringSwitch&) = delete;
+
+  StringSwitch(StringSwitch&& other) { *this = std::move(other); }
+  StringSwitch& operator=(StringSwitch&& other) {
+    Str = other.Str;
+    Result = other.Result;
+    return *this;
+  }
+
+  ~StringSwitch() = default;
+
+  // Case-sensitive case matchers.
+  template <unsigned N>
+  StringSwitch& Case(const wchar_t (&S)[N], const T& Value) {
+    DCHECK(N);
+    if (!Result && N - 1 == Str.size() && (N == 1 || Str.compare(S) == 0)) {
+      Result = &Value;
+    }
+    return *this;
+  }
+
+  R Default(const T& Value) const {
+    if (Result) return *Result;
+    return Value;
+  }
+
+  operator R() const {
+    DCHECK(Result && "Fell off the end of a string-switch");
+    return *Result;
+  }
+};
 
 class Scanner::ErrorState {
  public:
@@ -1014,6 +1060,80 @@ base::uc32 Scanner::ScanUnicodeEscape() {
   return ScanHexNumber<capture_raw, unicode>(4);
 }
 
+// Maps two-byte identifier literals (UTF-16, e.g. Chinese keywords) to their
+// token value. Identifiers that are not in the ZW keyword table fall through
+// to Token::kIdentifier.
+V8_INLINE Token::Value ZWKeywordOrIdentifierToken(const uint16_t* input,
+                                                  int input_length) {
+  // Build a std::wstring from the UTF-16 literal. On platforms where wchar_t
+  // is 16 bits this is a direct reinterpretation; otherwise each code unit is
+  // widened (all mapped keywords are BMP code points, so this stays correct).
+  std::wstring temp_input;
+  if (sizeof(wchar_t) == sizeof(uint16_t)) {
+    temp_input.append(reinterpret_cast<const wchar_t*>(input), input_length);
+  } else {
+    for (int i = 0; i < input_length; ++i) {
+      temp_input.push_back(static_cast<wchar_t>(input[i]));
+    }
+  }
+#define ZWKEYWORDS(ZWKEYWORD)    \
+  ZWKEYWORD("异", Token::kAsync)  \
+  ZWKEYWORD("等", Token::kAwait)  \
+  ZWKEYWORD("破", Token::kBreak)  \
+  ZWKEYWORD("例", Token::kCase)  \
+  ZWKEYWORD("获", Token::kCatch)  \
+  ZWKEYWORD("类", Token::kClass)  \
+  ZWKEYWORD("常", Token::kConst)  \
+  ZWKEYWORD("继", Token::kContinue)  \
+  ZWKEYWORD("调试", Token::kDebugger)  \
+  ZWKEYWORD("默", Token::kDefault)  \
+  ZWKEYWORD("删", Token::kDelete)  \
+  ZWKEYWORD("行", Token::kDo)  \
+  ZWKEYWORD("另", Token::kElse)  \
+  ZWKEYWORD("举", Token::kEnum)  \
+  ZWKEYWORD("导", Token::kExport)  \
+  ZWKEYWORD("承", Token::kExtends)  \
+  ZWKEYWORD("假", Token::kFalseLiteral)  \
+  ZWKEYWORD("末", Token::kFinally)  \
+  ZWKEYWORD("于", Token::kFor)  \
+  ZWKEYWORD("函", Token::kFunction)  \
+  ZWKEYWORD("取", Token::kGet)  \
+  ZWKEYWORD("如", Token::kIf)  \
+  ZWKEYWORD("引", Token::kImport)  \
+  ZWKEYWORD("在", Token::kIn)  \
+  ZWKEYWORD("是求", Token::kInstanceOf)  \
+  ZWKEYWORD("让", Token::kLet)  \
+  ZWKEYWORD("新", Token::kNew)  \
+  ZWKEYWORD("无", Token::kNullLiteral)  \
+  ZWKEYWORD("返", Token::kReturn)  \
+  ZWKEYWORD("设", Token::kSet)  \
+  ZWKEYWORD("固", Token::kStatic)  \
+  ZWKEYWORD("超", Token::kSuper)  \
+  ZWKEYWORD("切", Token::kSwitch)  \
+  ZWKEYWORD("此", Token::kThis)  \
+  ZWKEYWORD("抛", Token::kThrow)  \
+  ZWKEYWORD("真", Token::kTrueLiteral)  \
+  ZWKEYWORD("试", Token::kTry)  \
+  ZWKEYWORD("型求", Token::kTypeOf)  \
+  ZWKEYWORD("变", Token::kVar)  \
+  ZWKEYWORD("空", Token::kVoid)  \
+  ZWKEYWORD("当", Token::kWhile)  \
+  ZWKEYWORD("为之", Token::kWith)  \
+  ZWKEYWORD("降", Token::kYield)  \
+  ZWKEYWORD("实现", Token::kFutureStrictReservedWord)  \
+  ZWKEYWORD("接口", Token::kFutureStrictReservedWord)  \
+  ZWKEYWORD("包", Token::kFutureStrictReservedWord)  \
+  ZWKEYWORD("私有", Token::kFutureStrictReservedWord)  \
+  ZWKEYWORD("保护", Token::kFutureStrictReservedWord)  \
+  ZWKEYWORD("公开", Token::kFutureStrictReservedWord)
+#define ZW_KEYWORD(keyword, token) .Case(L##keyword, token)
+  return StringSwitch<Token::Value>(temp_input)
+      ZWKEYWORDS(ZW_KEYWORD)
+      .Default(Token::kIdentifier);
+#undef ZW_KEYWORD
+#undef ZWKEYWORDS
+}
+
 Token::Value Scanner::ScanIdentifierOrKeywordInnerSlow(bool escaped,
                                                        bool can_be_keyword) {
   while (true) {
@@ -1042,6 +1162,28 @@ Token::Value Scanner::ScanIdentifierOrKeywordInnerSlow(bool escaped,
     base::Vector<const uint8_t> chars = next().literal_chars.one_byte_literal();
     Token::Value token =
         KeywordOrIdentifierToken(chars.begin(), chars.length());
+    if (base::IsInRange(token, Token::kIdentifier, Token::kYield)) return token;
+
+    if (token == Token::kFutureStrictReservedWord) {
+      if (escaped) return Token::kEscapedStrictReservedWord;
+      return token;
+    }
+
+    if (!escaped) return token;
+
+    static_assert(Token::kLet + 1 == Token::kStatic);
+    if (base::IsInRange(token, Token::kLet, Token::kStatic)) {
+      return Token::kEscapedStrictReservedWord;
+    }
+    return Token::kEscapedKeyword;
+  }
+
+  // Two-byte literals (identifiers containing non-ASCII characters, e.g.
+  // Chinese keywords) are dispatched through the ZW keyword table.
+  if (!next().literal_chars.is_one_byte()) {
+    base::Vector<const uint16_t> chars = next().literal_chars.two_byte_literal();
+    Token::Value token =
+        ZWKeywordOrIdentifierToken(chars.begin(), chars.length());
     if (base::IsInRange(token, Token::kIdentifier, Token::kYield)) return token;
 
     if (token == Token::kFutureStrictReservedWord) {
